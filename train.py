@@ -70,21 +70,22 @@ def make_mod_add_split(p: int, train_frac: float, seed: int, device: torch.devic
 
 
 class CausalTransformer1L(nn.Module):
-    def __init__(self, vocab_size: int, p_out: int, seq_len: int, d_model: int, nhead: int, d_ff: int):
+    def __init__(self, vocab_size: int, p_out: int, seq_len: int, d_model: int, nhead: int, d_ff: int, num_layers: int):
         super().__init__()
         self.seq_len = seq_len
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(seq_len, d_model)
 
+        # decoder-only
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=d_ff,
             activation="gelu",
             batch_first=True,
-            norm_first=True,
+            norm_first=True, # Pre/post was unclear in the original paper; we chose pre.
         )
-        self.encoder = nn.TransformerEncoder(layer, num_layers=1, norm=nn.LayerNorm(d_model))
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, norm=nn.LayerNorm(d_model))
         self.out = nn.Linear(d_model, p_out)
 
         mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
@@ -147,15 +148,16 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
-    ap.add_argument("--batch_size", type=int, default=1024)
+    ap.add_argument("--batch_size", type=int, default=512)
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
     ap.add_argument("--d_ff", type=int, default=512)
+    ap.add_argument("--num_layers", type=int, default=2)
 
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
-    ap.add_argument("--weight_decay", type=float, default=0.0)
+    ap.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay coefficient (L2 penalty). Authors observed weight decay 1.0 achieved generalization in half the steps compared to no weight decay.")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
         if torch.backends.mps.is_available() else "cpu")
     ap.add_argument("--profile", action="store_true", help="Enable torch.profiler for the forward pass")
@@ -198,6 +200,7 @@ def main():
         d_model=args.d_model,
         nhead=args.nhead,
         d_ff=args.d_ff,
+        num_layers=args.num_layers
     ).to(device)
     model = torch.compile(model)
 
@@ -274,7 +277,7 @@ def main():
                 f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                 f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                 f"elapsed_s={dt:.1f}  "
-                f"cum_tokens:{cum_tokens}  "
+                f"cum_tokens:{cum_tokens:,}  "
                 f"lr={lr:.6f}  "
                 f"lr_scale={lr_scale:.6f}"
             )
