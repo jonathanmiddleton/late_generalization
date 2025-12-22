@@ -30,6 +30,8 @@ class ModOpSpec:
 
 class ModAddTokensDataset(Dataset):
     def __init__(self, tokens: torch.Tensor, labels: torch.Tensor, device: torch.device):
+        if tokens.shape[0] != labels.shape[0]:
+            raise ValueError(f"tokens and labels must have same length: {tokens.shape[0]} vs {labels.shape[0]}")
         self.tokens = tokens.long().to(device, non_blocking=True)
         self.labels = labels.long().to(device, non_blocking=True)
 
@@ -148,7 +150,7 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
-    ap.add_argument("--batch_size", type=int, default=512)
+    ap.add_argument("--batch_size", type=int, default=512, help="Batch size. For p<23 we use min(batch_size,p^2).")
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
@@ -156,6 +158,7 @@ def main():
     ap.add_argument("--num_layers", type=int, default=2)
 
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--lr_warmup_steps", type=int, default=10, help="Linear warmup over first N steps of training.")
     ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
     ap.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay coefficient (L2 penalty). Authors observed weight decay 1.0 achieved generalization in half the steps compared to no weight decay.")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
@@ -188,7 +191,7 @@ def main():
     train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
 
     #noinspection PyTypeChecker
-    train_bs = min(args.batch_size, len(train_ds))
+    train_bs = min(args.batch_size, len(train_ds)) if args.p >= 23 else min(args.p**2, args.batch_size)
     train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
     train_eval_loader = DataLoader(train_ds, batch_size=2048, shuffle=False, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=2048, shuffle=False, num_workers=0)
@@ -218,6 +221,8 @@ def main():
     t0 = time.time()
     train_iter = iter(train_loader)
     tokens_per_step = args.batch_size * spec.seq_len
+    warmup_steps = min(args.lr_warmup_steps, args.steps)
+
     cum_tokens = 0
     log_train_every = args.wandb_log_every
 
@@ -263,9 +268,16 @@ def main():
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
+
+        # calculate learning rate
+        if step <= warmup_steps:
+            lr_scale = step / warmup_steps
+        else:
+            lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
         lr =  args.lr * lr_scale
+
         for pg in opt.param_groups: pg["lr"] = lr
+
         opt.step()
 
         if step == 1 or step % args.eval_every == 0:
