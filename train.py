@@ -209,7 +209,7 @@ def main():
     t0 = time.time()
     train_iter = iter(train_loader)
     wandb_log_stepsize = max(1, args.eval_every // 100)
-    tokens_per_step = args.batch_size * args.seq_len
+    tokens_per_step = args.batch_size * spec.seq_len
     cum_tokens = 0
 
     for step in range(1, args.steps + 1):
