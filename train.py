@@ -144,8 +144,9 @@ def main():
     ap.add_argument("--p", type=int, default=97, help="(prime) modulus of the operation")
     ap.add_argument("--train_frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=1337)
-    ap.add_argument("--steps", type=int, default=200_000)
-    ap.add_argument("--eval_every", type=int, default=250)
+    ap.add_argument("--steps", type=int, default=100_000)
+    ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps. Note: we val/log the fir")
+    ap.add_argument("--log_train_every", type=int, default=50, help="Log training loss every N steps.")
     ap.add_argument("--batch_size", type=int, default=1024)
 
     ap.add_argument("--d_model", type=int, default=128)
@@ -153,28 +154,25 @@ def main():
     ap.add_argument("--d_ff", type=int, default=512)
 
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--cooldown_frac", type=float, default=0.0)
+    ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
         if torch.backends.mps.is_available() else "cpu")
     ap.add_argument("--profile", action="store_true", help="Enable torch.profiler for the forward pass")
     ap.add_argument("--profile_steps", type=int, default=1, help="Profile only the first N steps (0 = never). Skips first two steps.")
+    ap.add_argument("--high_precision", action="store_true", help="Strict FP32 datatypes and matmul kernels.")
 
 
     args = ap.parse_args()
 
-    # ------------ Determinism and Precision ------------- #
-    # disallow TF32 for matmul and cuDNN convs
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    if args.high_precision:
+        # disallow TF32 for matmul and cuDNN convs
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
-    # favor highest-precision FP32 matmul kernels
-    torch.set_float32_matmul_precision("highest")
-    torch.set_default_dtype(torch.float32)
-
-    # required to increase likelihood of deterministic results from cuDNN
-    #torch.use_deterministic_algorithms(True)
-    #torch.backends.cudnn.benchmark = False
+        # favor highest-precision FP32 matmul kernels
+        torch.set_float32_matmul_precision("highest")
+        torch.set_default_dtype(torch.float32)
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -216,11 +214,11 @@ def main():
 
     t0 = time.time()
     train_iter = iter(train_loader)
-    wandb_log_stepsize = max(1, args.eval_every // 100)
     tokens_per_step = args.batch_size * spec.seq_len
     cum_tokens = 0
+    log_train_every = args.log_train_every
 
-    ctx = nullcontext() if device.type == 'cpu' else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
+    ctx = nullcontext() if device.type == 'cpu' or args.high_precision else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
 
     for step in range(1, args.steps + 1):
         cum_tokens += tokens_per_step
@@ -274,10 +272,12 @@ def main():
                 f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                 f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                 f"elapsed_s={dt:.1f}"
+                f"cum_tokens:{cum_tokens}"
             )
             _wandb.log({"train/loss": train_loss, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "cum_tokens":cum_tokens})
-        elif step % wandb_log_stepsize == 0:
+        elif step % log_train_every == 0:
             train_loss = loss.detach().item()
+            print(f"step={step:>7d} train/loss: {train_loss:.6f}, cum_tokens={cum_tokens}")
             _wandb.log({"step": step, "train/loss": train_loss, "cum_tokens":cum_tokens})
 
     train_loss, train_acc = evaluate(model, train_eval_loader, device)
