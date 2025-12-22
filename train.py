@@ -228,8 +228,8 @@ def main():
     #noinspection PyTypeChecker
     print(f"p={spec.p}  train={len(train_ds)}  val={len(val_ds)}  chance_acc={chance_acc:.6f}")
     print(
-        f"model: 1-layer causal Transformer  d_model={args.d_model} nhead={args.nhead} d_ff={args.d_ff}  "
-        f"opt=AdamW lr={args.lr} wd={args.weight_decay}"
+        f"model: num_layers={args.num_layers}  d_model={args.d_model}  nhead={args.nhead}  d_ff={args.d_ff}  "
+        f"opt=AdamW  lr={args.lr}  wd={args.weight_decay}"
     )
 
     t0 = time.time()
