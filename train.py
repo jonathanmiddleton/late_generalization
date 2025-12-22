@@ -234,27 +234,22 @@ def main():
 
     t0 = time.time()
     train_iter = iter(train_loader)
-    tokens_per_step = train_bs * spec.seq_len
     warmup_steps = min(args.lr_warmup_steps, args.steps)
 
-    cum_tokens = 0
+    total_tokens = 0
     log_train_every = args.wandb_log_every
 
     ctx = nullcontext() if device.type == 'cpu' or args.high_precision else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
 
+    x, y = next(train_iter)
+
     for step in range(1, args.steps + 1):
         # -------------- train -------------- #
-        cum_tokens += tokens_per_step
         model.train()
 
-        try:
-            x, y = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_loader)
-            x, y = next(train_iter)
 
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+        tokens_this_step = x.size(-1) * spec.seq_len
+        total_tokens += tokens_this_step
 
         skip_steps=2
         do_profile = (args.profile_steps > 0 and
@@ -275,6 +270,13 @@ def main():
         with ctx:
             with prof_ctx as prof:
                 logits = model(x)
+
+        # prefetch next batch
+        try:
+            _x, _y = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            _x, _y = next(train_iter)
 
         if do_profile:
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
@@ -304,14 +306,17 @@ def main():
                 f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                 f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                 f"elapsed_s={dt:.1f}  "
-                f"cum_tokens:{cum_tokens:,}  "
+                f"cum_tokens:{total_tokens:,}  "
                 f"lr={lr:.6f}  "
                 f"lr_scale={lr_scale:.6f}"
             )
-            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":total_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
         elif step % log_train_every == 0:
             train_loss = loss.detach().item()
-            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":total_tokens, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
+
+        # next batch
+        x, y = _x, _y
 
     _wandb.finish()
 
