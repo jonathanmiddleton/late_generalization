@@ -1,0 +1,101 @@
+{
+  "p": {
+    "value": 97
+  },
+  "lr": {
+    "value": 0.002100883764483382
+  },
+  "d_ff": {
+    "value": 2048
+  },
+  "seed": {
+    "value": 1337
+  },
+  "nhead": {
+    "value": 8
+  },
+  "steps": {
+    "value": 10000
+  },
+  "device": {
+    "value": "cuda"
+  },
+  "optuna": {
+    "value": true
+  },
+  "d_model": {
+    "value": 512
+  },
+  "dropout": {
+    "value": 0.17347231884781236
+  },
+  "no_wandb": {
+    "value": false
+  },
+  "batch_size": {
+    "value": 512
+  },
+  "eval_every": {
+    "value": 250
+  },
+  "no_compile": {
+    "value": false
+  },
+  "num_layers": {
+    "value": 3
+  },
+  "train_frac": {
+    "value": 0.5
+  },
+  "wandb_name": {
+    "value": "trial_9"
+  },
+  "optuna_seed": {
+    "value": 1337
+  },
+  "wandb_group": {
+    "value": "late_generalization_optuna"
+  },
+  "weight_decay": {
+    "value": 1.4036581195044446
+  },
+  "cooldown_frac": {
+    "value": 0.025671528238476623
+  },
+  "optuna_metric": {
+    "value": "val_acc"
+  },
+  "optuna_pruner": {
+    "value": "none"
+  },
+  "profile_steps": {
+    "value": 0
+  },
+  "wandb_project": {
+    "value": "late_generalization"
+  },
+  "high_precision": {
+    "value": false
+  },
+  "optuna_sampler": {
+    "value": "tpe"
+  },
+  "optuna_storage": {
+    "value": ""
+  },
+  "lr_warmup_steps": {
+    "value": 126
+  },
+  "optuna_n_trials": {
+    "value": 50
+  },
+  "wandb_log_every": {
+    "value": 250
+  },
+  "optuna_timeout_s": {
+    "value": 0
+  },
+  "optuna_study_name": {
+    "value": "late_generalization_optuna"
+  }
+}

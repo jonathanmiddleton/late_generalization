@@ -386,7 +386,7 @@ def run_optuna(args: argparse.Namespace) -> None:
     storage = args.optuna_storage if args.optuna_storage else None
     study = optuna.create_study(
         study_name=args.optuna_study_name,
-        storage=storage,
+        storage=run_optunastorage,
         load_if_exists=bool(storage),
         direction=direction,
         sampler=sampler,
@@ -400,7 +400,7 @@ def run_optuna(args: argparse.Namespace) -> None:
         d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
         d_ff = int(d_model * d_ff_mult)
 
-        num_layers = trial.suggest_int("num_layers", 1, 4)
+        num_layers = trial.suggest_int("num_layers", 1, 2)
         dropout = trial.suggest_float("dropout", 0.0, 0.3)
         lr = trial.suggest_float("lr", 3e-4, 3e-3, log=True)
         weight_decay = trial.suggest_float("weight_decay", 0.0, 2.0)
@@ -446,7 +446,7 @@ def main():
     ap.add_argument("--train_frac", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=100_000, help="Total number of training steps. For Optuna, a reasonable choice is ~250 steps per trial.")
-    ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
+    ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps. For Optuna, a reasonable choice is ~50 steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
     ap.add_argument("--batch_size", type=int, default=512, help="Requested batch size.")
 
@@ -483,7 +483,7 @@ def main():
     args = ap.parse_args()
 
     if args.optuna:
-        run_optuna(args)
+        (args)
     else:
         train_and_eval(args)
 
