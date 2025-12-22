@@ -3,8 +3,6 @@ import time
 from dataclasses import dataclass
 from contextlib import nullcontext
 
-from networkx.classes import number_of_edges
-
 import wandb as _wandb
 import math
 
