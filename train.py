@@ -8,7 +8,6 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-
 @dataclass(frozen=True)
 class ModOpSpec:
     p: int = 97
@@ -105,7 +104,7 @@ class CausalTransformer1L(nn.Module):
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[float, float]:
     model.eval()
     loss_fn = nn.CrossEntropyLoss()
-    total_loss = 0.0
+    total_loss = torch.tensor(0.0, device=device)
     total_correct = 0
     total = 0
 
@@ -116,15 +115,17 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
         loss = loss_fn(logits, y)
 
         bs = y.shape[0]
-        total_loss += loss.item() * bs
+        total_loss += loss.detach() * bs
         # noinspection PyUnresolvedReferences
-        total_correct += (logits.argmax(dim=-1) == y).sum().item()
+        total_correct += (logits.argmax(dim=-1) == y).sum()
         total += bs
 
-    return total_loss / max(1, total), total_correct / max(1, total)
+    return total_loss.item() / max(1, total), total_correct / max(1, total)
 
 def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
     """Constant 1.0 until cooldown, then cosine decay to 0.0 over cooldown span."""
+    if cooldown_frac == 0.0:
+        return 1.0
     x = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
     c = 0.0 if cooldown_frac < 0.0 else (1.0 if cooldown_frac > 1.0 else cooldown_frac)
     if c <= 0.0:
@@ -136,7 +137,7 @@ def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p", type=int, default=97)
+    ap.add_argument("--p", type=int, default=97, help="(prime) modulus of the operation")
     ap.add_argument("--train_frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=200_000)
@@ -148,14 +149,29 @@ def main():
     ap.add_argument("--d_ff", type=int, default=512)
 
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--cooldown_frac", type=float, default=0.0)
     ap.add_argument("--weight_decay", type=float, default=0.0)
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
+        if torch.backends.mps.is_available() else "cpu")
 
     args = ap.parse_args()
+
+    # ------------ Determinism and Precision ------------- #
+    # disallow TF32 for matmul and cuDNN convs
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+    # favor highest-precision FP32 matmul kernels
+    torch.set_float32_matmul_precision("highest")
+    torch.set_default_dtype(torch.float32)
+    torch.use_deterministic_algorithms(True)
+    # despite above, below may be required to increase likelihood of deterministic results from cuDNN
+    torch.backends.cudnn.benchmark = False
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+    # ---------------------------------------------------- #
 
     _wandb = wandb.init(project="late_generalization", config=vars(args))
 
@@ -177,6 +193,7 @@ def main():
         nhead=args.nhead,
         d_ff=args.d_ff,
     ).to(device)
+    model = torch.compile(model)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -209,7 +226,7 @@ def main():
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        lr = cosine_decay_schedule(step / args.steps) * args.lr
+        lr = cosine_decay_schedule(step / args.steps, args.cooldown_frac) * args.lr
         for pg in opt.param_groups: pg["lr"] = lr
         opt.step()
 
