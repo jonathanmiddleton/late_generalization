@@ -214,8 +214,11 @@ def main():
 
     loss_fn = nn.CrossEntropyLoss()
 
+    chance_acc = 1.0/spec.p
+    chance_loss = -torch.log(torch.tensor(chance_acc, device='cpu')).item()
+
     #noinspection PyTypeChecker
-    print(f"p={spec.p}  train={len(train_ds)}  val={len(val_ds)}  chance_acc={1.0/spec.p:.6f}")
+    print(f"p={spec.p}  train={len(train_ds)}  val={len(val_ds)}  chance_acc={chance_acc:.6f}")
     print(
         f"model: 1-layer causal Transformer  d_model={args.d_model} nhead={args.nhead} d_ff={args.d_ff}  "
         f"opt=AdamW lr={args.lr} wd={args.weight_decay}"
@@ -296,10 +299,12 @@ def main():
                 f"lr={lr:.6f}  "
                 f"lr_scale={lr_scale:.6f}"
             )
-            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
         elif step % log_train_every == 0:
             train_loss = loss.detach().item()
-            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "lr":lr, "lr_scale":lr_scale})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
+
+    _wandb.finish()
 
     train_loss, train_acc = evaluate(model, train_eval_loader, device)
     val_loss, val_acc = evaluate(model, val_loader, device)
