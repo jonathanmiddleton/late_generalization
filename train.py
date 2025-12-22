@@ -99,7 +99,7 @@ class SimpleCausalTransformer(nn.Module):
 
         pos = torch.arange(seqlen, device=tokens.device)
         x = self.tok_emb(tokens) + self.pos_emb(pos)[None, :, :]
-        x = self.encoder(x, is_causal=True)
+        x = self.encoder(x, mask=self.causal_mask, is_causal=True)
         h = x[:, -1, :]
         return self.out(h)
 
