@@ -243,18 +243,16 @@ def main():
 
     x, y = next(train_iter)
 
+    profiler_skip_steps = 2 # throw away first step which includes compilation
+
     for step in range(1, args.steps + 1):
         # -------------- train -------------- #
         model.train()
 
+        B, T = x.shape
+        total_tokens += B * T
 
-        tokens_this_step = x.size(-1) * spec.seq_len
-        total_tokens += tokens_this_step
-
-        skip_steps=2
-        do_profile = (args.profile_steps > 0 and
-                      # throw away first step which includes compilation
-                      (step <= args.profile_steps+skip_steps) and step > skip_steps)
+        do_profile = (args.profile_steps > 0 and (step <= args.profile_steps+profiler_skip_steps) and step > profiler_skip_steps)
         prof_ctx = (
             profile(
                 activities=[
@@ -306,7 +304,7 @@ def main():
                 f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                 f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                 f"elapsed_s={dt:.1f}  "
-                f"cum_tokens:{total_tokens:,}  "
+                f"total_tokens:{total_tokens:,}  "
                 f"lr={lr:.6f}  "
                 f"lr_scale={lr_scale:.6f}"
             )
