@@ -235,7 +235,8 @@ def main():
 
         skip_steps=2
         do_profile = (args.profile and (args.profile_steps > 0) and
-                      (step <= args.profile_steps+skip_steps) and step > skip_steps) #throw away first step which includes compilation
+                      # throw away first step which includes compilation
+                      (step <= args.profile_steps+skip_steps) and step > skip_steps)
         prof_ctx = (
             profile(
                 activities=[
