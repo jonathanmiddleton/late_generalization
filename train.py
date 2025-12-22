@@ -178,7 +178,7 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
             config=vars(args),
             group=args.wandb_group if args.wandb_group else None,
             name=args.wandb_name if args.wandb_name else None,
-            reinit=True,
+            finish_previous=True,
         )
 
     try:
@@ -445,7 +445,7 @@ def main():
     ap.add_argument("--p", type=int, default=97, help="(prime) modulus of the operation")
     ap.add_argument("--train_frac", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1337)
-    ap.add_argument("--steps", type=int, default=100_000)
+    ap.add_argument("--steps", type=int, default=100_000, help="Total number of training steps. For Optuna, a reasonable choice is ~250 steps per trial.")
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
     ap.add_argument("--batch_size", type=int, default=512, help="Requested batch size.")
