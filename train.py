@@ -210,7 +210,9 @@ def main():
     ).to(device)
     model = torch.compile(model)
 
-    non_embedding_params = filter(lambda p: p.requires_grad, model.parameters()) - model.tok_emb.parameters() - model.pos_emb.parameters()
+    # trainable params excluding embedding weights
+    embed_param_ids = {id(p) for p in model.tok_emb.parameters()} | {id(p) for p in model.pos_emb.parameters()}
+    non_embedding_params = [p for p in model.parameters() if p.requires_grad and id(p) not in embed_param_ids]
     print(f"non-embedding trainable params: {sum(p.numel() for p in non_embedding_params)}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
