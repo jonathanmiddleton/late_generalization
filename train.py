@@ -71,8 +71,8 @@ def make_mod_add_split(p: int, train_frac: float, seed: int, device: torch.devic
     return train_ds, val_ds, spec
 
 
-class CausalTransformer1L(nn.Module):
-    def __init__(self, vocab_size: int, p_out: int, seq_len: int, d_model: int, nhead: int, d_ff: int, num_layers: int):
+class SimpleCausalTransformer(nn.Module):
+    def __init__(self, vocab_size: int, p_out: int, seq_len: int, d_model: int, nhead: int, d_ff: int, num_layers: int, dropout: float):
         super().__init__()
         self.seq_len = seq_len
         self.tok_emb = nn.Embedding(vocab_size, d_model)
@@ -85,7 +85,8 @@ class CausalTransformer1L(nn.Module):
             dim_feedforward=d_ff,
             activation="gelu",
             batch_first=True,
-            norm_first=True, # Pre/post was unclear in the original paper; we chose pre.
+            norm_first=True,  # Pre/post was unclear in the original paper; we chose pre.
+            dropout=dropout,
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, norm=nn.LayerNorm(d_model))
         self.out = nn.Linear(d_model, p_out)
@@ -156,6 +157,7 @@ def main():
     ap.add_argument("--nhead", type=int, default=4)
     ap.add_argument("--d_ff", type=int, default=512)
     ap.add_argument("--num_layers", type=int, default=2)
+    ap.add_argument("--dropout", type=float, default=0.0, help="Dropout probability in Transformer layers (0.0 disables).")
 
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--lr_warmup_steps", type=int, default=10, help="Linear warmup over first N steps of training.")
@@ -203,7 +205,8 @@ def main():
         d_model=args.d_model,
         nhead=args.nhead,
         d_ff=args.d_ff,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        dropout = args.dropout,
     ).to(device)
     model = torch.compile(model)
 
