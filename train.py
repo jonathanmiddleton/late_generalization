@@ -260,7 +260,8 @@ def main():
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        lr = cosine_decay_schedule(step / args.steps, args.cooldown_frac) * args.lr
+        lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
+        lr =  args.lr * lr_scale
         for pg in opt.param_groups: pg["lr"] = lr
         opt.step()
 
@@ -275,10 +276,10 @@ def main():
                 f"elapsed_s={dt:.1f}  "
                 f"cum_tokens:{cum_tokens}"
             )
-            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale})
         elif step % log_train_every == 0:
             train_loss = loss.detach().item()
-            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "lr":lr, "lr_scale":lr_scale})
 
     train_loss, train_acc = evaluate(model, train_eval_loader, device)
     val_loss, val_acc = evaluate(model, val_loader, device)
