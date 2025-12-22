@@ -185,7 +185,7 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
         train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
 
         #noinspection PyTypeChecker
-        train_bs = int(min(args.batch_size, len(train_ds)))
+        train_bs = int(min(args.batch_size, len(train_ds)//2))
         eval_bs = 2048
         train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
         train_eval_loader = DataLoader(train_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
@@ -448,7 +448,7 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
-    ap.add_argument("--batch_size", type=int, default=512, help="Requested batch size. We use min(batch_size,p^2*train_frac).")
+    ap.add_argument("--batch_size", type=int, default=512, help="Requested batch size.")
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
