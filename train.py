@@ -149,7 +149,7 @@ def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--p", type=int, default=97, help="(prime) modulus of the operation")
-    ap.add_argument("--train_frac", type=float, default=0.2)
+    ap.add_argument("--train_frac", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
