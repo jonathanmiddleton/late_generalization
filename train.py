@@ -274,7 +274,9 @@ def main():
                 f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                 f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                 f"elapsed_s={dt:.1f}  "
-                f"cum_tokens:{cum_tokens}"
+                f"cum_tokens:{cum_tokens}  "
+                f"lr={lr:.6f}  "
+                f"lr_scale={lr_scale:.6f}"
             )
             _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale})
         elif step % log_train_every == 0:
