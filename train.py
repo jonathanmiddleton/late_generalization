@@ -146,7 +146,7 @@ def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--p", type=int, default=97, help="(prime) modulus of the operation")
-    ap.add_argument("--train_frac", type=float, default=0.5)
+    ap.add_argument("--train_frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
@@ -165,8 +165,7 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay coefficient (L2 penalty). Authors observed weight decay 1.0 achieved generalization in half the steps compared to no weight decay.")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
         if torch.backends.mps.is_available() else "cpu")
-    ap.add_argument("--profile", action="store_true", help="Enable torch.profiler for the forward pass")
-    ap.add_argument("--profile_steps", type=int, default=1, help="Profile only the first N steps (0 = never). Skips first two steps.")
+    ap.add_argument("--profile_steps", type=int, default=0, help="Profile only the first N steps (0 = never). Skips first two steps.")
     ap.add_argument("--high_precision", action="store_true", help="Strict FP32 datatypes and matmul kernels.")
 
 
@@ -248,7 +247,7 @@ def main():
         y = y.to(device, non_blocking=True)
 
         skip_steps=2
-        do_profile = (args.profile and (args.profile_steps > 0) and
+        do_profile = (args.profile_steps > 0 and
                       # throw away first step which includes compilation
                       (step <= args.profile_steps+skip_steps) and step > skip_steps)
         prof_ctx = (
@@ -267,7 +266,7 @@ def main():
             with prof_ctx as prof:
                 logits = model(x)
 
-        if do_profile and prof is not None:
+        if do_profile:
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
 
         loss = loss_fn(logits, y)
