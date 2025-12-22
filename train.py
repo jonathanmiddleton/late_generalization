@@ -210,6 +210,9 @@ def main():
     ).to(device)
     model = torch.compile(model)
 
+    non_embedding_params = filter(lambda p: p.requires_grad, model.parameters()) - model.tok_emb.parameters() - model.pos_emb.parameters()
+    print(f"non-embedding trainable params: {sum(p.numel() for p in non_embedding_params)}")
+
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     loss_fn = nn.CrossEntropyLoss()
@@ -235,6 +238,7 @@ def main():
     ctx = nullcontext() if device.type == 'cpu' or args.high_precision else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
 
     for step in range(1, args.steps + 1):
+        # -------------- train -------------- #
         cum_tokens += tokens_per_step
         model.train()
 
@@ -281,11 +285,11 @@ def main():
         else:
             lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
         lr =  args.lr * lr_scale
-
         for pg in opt.param_groups: pg["lr"] = lr
-
         opt.step()
 
+
+        # -------------- eval -------------- #
         if step == 1 or step % args.eval_every == 0:
             train_loss, train_acc = evaluate(model, train_eval_loader, device)
             val_loss, val_acc = evaluate(model, val_loader, device)
