@@ -151,7 +151,7 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
-    ap.add_argument("--batch_size", type=int, default=512, help="Batch size. We use min(batch_size,p^2).")
+    ap.add_argument("--batch_size", type=int, default=512, help="Batch size. We use min(batch_size,p^2*train_frac).")
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
@@ -192,10 +192,11 @@ def main():
     train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
 
     #noinspection PyTypeChecker
-    train_bs = min(args.batch_size, len(train_ds)) if args.p >= 23 else min(args.p**2, args.batch_size)
+    train_bs = min(args.batch_size, len(train_ds)) if args.p >= 23 else min(args.p**2*args.train_frac, args.batch_size)
+    eval_bs = 2048
     train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
-    train_eval_loader = DataLoader(train_ds, batch_size=2048, shuffle=False, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=2048, shuffle=False, num_workers=0)
+    train_eval_loader = DataLoader(train_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
 
     model = SimpleCausalTransformer(
         vocab_size=spec.vocab_size,
@@ -225,7 +226,7 @@ def main():
 
     t0 = time.time()
     train_iter = iter(train_loader)
-    tokens_per_step = args.batch_size * spec.seq_len
+    tokens_per_step = train_bs * spec.seq_len
     warmup_steps = min(args.lr_warmup_steps, args.steps)
 
     cum_tokens = 0
