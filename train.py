@@ -146,7 +146,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps. Note: we val/log the fir")
-    ap.add_argument("--wandb_log_every", type=int, default=50, help="Log training loss every N steps to wandb.")
+    ap.add_argument("--wandb_log_every", type=int, default=100, help="Log training loss every N steps to wandb.")
     ap.add_argument("--batch_size", type=int, default=1024)
 
     ap.add_argument("--d_model", type=int, default=128)
@@ -275,7 +275,7 @@ def main():
                 f"elapsed_s={dt:.1f}  "
                 f"cum_tokens:{cum_tokens}"
             )
-            _wandb.log({"train/loss": train_loss, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "tokens":cum_tokens})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr})
         elif step % log_train_every == 0:
             train_loss = loss.detach().item()
             _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens})
