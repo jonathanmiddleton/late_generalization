@@ -1,12 +1,14 @@
 import argparse
 import time
 from dataclasses import dataclass
-import wandb
+from contextlib import nullcontext
+import wandb as _wandb
 import math
 
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
+from torch.profiler import profile, ProfilerActivity
 
 @dataclass(frozen=True)
 class ModOpSpec:
@@ -27,9 +29,9 @@ class ModOpSpec:
 
 
 class ModAddTokensDataset(Dataset):
-    def __init__(self, tokens: torch.Tensor, labels: torch.Tensor):
-        self.tokens = tokens.long()
-        self.labels = labels.long()
+    def __init__(self, tokens: torch.Tensor, labels: torch.Tensor, device: torch.device):
+        self.tokens = tokens.long().to(device, non_blocking=True)
+        self.labels = labels.long().to(device, non_blocking=True)
 
     def __len__(self) -> int:
         return self.labels.shape[0]
@@ -38,7 +40,7 @@ class ModAddTokensDataset(Dataset):
         return self.tokens[idx], self.labels[idx]
 
 
-def make_mod_add_split(p: int, train_frac: float, seed: int) -> tuple[Dataset, Dataset, ModOpSpec]:
+def make_mod_add_split(p: int, train_frac: float, seed: int, device: torch.device) -> tuple[Dataset, Dataset, ModOpSpec]:
     spec = ModOpSpec(p=p, op_token=p, eq_token=p + 1)
 
     a = torch.arange(p, dtype=torch.long)
@@ -62,8 +64,8 @@ def make_mod_add_split(p: int, train_frac: float, seed: int) -> tuple[Dataset, D
     train_idx = perm[:n_train]
     val_idx = perm[n_train:]
 
-    train_ds = ModAddTokensDataset(tokens[train_idx], labels[train_idx])
-    val_ds = ModAddTokensDataset(tokens[val_idx], labels[val_idx])
+    train_ds = ModAddTokensDataset(tokens[train_idx], labels[train_idx], device=device)
+    val_ds = ModAddTokensDataset(tokens[val_idx], labels[val_idx], device=device)
     return train_ds, val_ds, spec
 
 
@@ -105,8 +107,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
     model.eval()
     loss_fn = nn.CrossEntropyLoss()
     total_loss = torch.tensor(0.0, device=device)
-    total_correct = 0
-    total = 0
+    total_correct = torch.zeros((), device=device, dtype=torch.long)
+    total = torch.zeros((), device=device, dtype=torch.long)
 
     for x, y in loader:
         x = x.to(device, non_blocking=True)
@@ -116,11 +118,13 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
 
         bs = y.shape[0]
         total_loss += loss.detach() * bs
-        # noinspection PyUnresolvedReferences
         total_correct += (logits.argmax(dim=-1) == y).sum()
         total += bs
 
-    return total_loss.item() / max(1, total), total_correct / max(1, total)
+    avg_loss = total_loss / total.clamp_min(1)
+    acc = total_correct.to(torch.float32) / total.clamp_min(1).to(torch.float32)
+
+    return avg_loss.item(), acc.item()
 
 def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
     """Constant 1.0 until cooldown, then cosine decay to 0.0 over cooldown span."""
@@ -153,6 +157,9 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
         if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--profile", action="store_true", help="Enable torch.profiler for the forward pass")
+    ap.add_argument("--profile_steps", type=int, default=1, help="Profile only the first N steps (0 = never). Skips first two steps.")
+
 
     args = ap.parse_args()
 
@@ -164,26 +171,27 @@ def main():
     # favor highest-precision FP32 matmul kernels
     torch.set_float32_matmul_precision("highest")
     torch.set_default_dtype(torch.float32)
-    torch.use_deterministic_algorithms(True)
-    # despite above, below may be required to increase likelihood of deterministic results from cuDNN
-    torch.backends.cudnn.benchmark = False
+
+    # required to increase likelihood of deterministic results from cuDNN
+    #torch.use_deterministic_algorithms(True)
+    #torch.backends.cudnn.benchmark = False
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     # ---------------------------------------------------- #
 
-    _wandb = wandb.init(project="late_generalization", config=vars(args))
+    _wandb.init(project="late_generalization", config=vars(args))
 
     device = torch.device(args.device)
 
-    train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed)
+    train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
 
     #noinspection PyTypeChecker
     train_bs = min(args.batch_size, len(train_ds))
-    train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0, pin_memory=True)
-    train_eval_loader = DataLoader(train_ds, batch_size=2048, shuffle=False, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=2048, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
+    train_eval_loader = DataLoader(train_ds, batch_size=2048, shuffle=False, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=2048, shuffle=False, num_workers=0)
 
     model = CausalTransformer1L(
         vocab_size=spec.vocab_size,
@@ -212,6 +220,8 @@ def main():
     tokens_per_step = args.batch_size * spec.seq_len
     cum_tokens = 0
 
+    ctx = nullcontext() if device.type == 'cpu' else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
+
     for step in range(1, args.steps + 1):
         cum_tokens += tokens_per_step
         model.train()
@@ -225,7 +235,28 @@ def main():
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
 
-        logits = model(x)
+        skip_steps=2
+        do_profile = (args.profile and (args.profile_steps > 0) and
+                      (step <= args.profile_steps+skip_steps) and step > skip_steps) #throw away first step which includes compilation
+        prof_ctx = (
+            profile(
+                activities=[
+                    ProfilerActivity.CPU,
+                    ProfilerActivity.CUDA if device.type == "cuda" else ProfilerActivity.CPU,
+                ],
+                record_shapes=True,
+            )
+            if do_profile
+            else nullcontext()
+        )
+
+        with ctx:
+            with prof_ctx as prof:
+                logits = model(x)
+
+        if do_profile and prof is not None:
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
+
         loss = loss_fn(logits, y)
 
         opt.zero_grad(set_to_none=True)
