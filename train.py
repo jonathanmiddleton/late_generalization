@@ -145,8 +145,8 @@ def main():
     ap.add_argument("--train_frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=100_000)
-    ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps. Note: we val/log the fir")
-    ap.add_argument("--wandb_log_every", type=int, default=100, help="Log training loss every N steps to wandb.")
+    ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
+    ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
     ap.add_argument("--batch_size", type=int, default=1024)
 
     ap.add_argument("--d_model", type=int, default=128)
