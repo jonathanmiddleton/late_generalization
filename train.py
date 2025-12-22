@@ -2,14 +2,16 @@ import argparse
 import time
 from dataclasses import dataclass
 from contextlib import nullcontext
+import gc
+import math
 
 import wandb as _wandb
-import math
 
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch.profiler import profile, ProfilerActivity
+
 
 @dataclass(frozen=True)
 class ModOpSpec:
@@ -79,18 +81,18 @@ class SimpleCausalTransformer(nn.Module):
         self.tok_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(seq_len, d_model)
 
-        # decoder-only
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=d_ff,
             activation="gelu",
             batch_first=True,
-            norm_first=True,  # Pre/post was unclear in the original paper; we chose pre.
+            norm_first=True,
             dropout=dropout,
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, norm=nn.LayerNorm(d_model))
         self.out = nn.Linear(d_model, p_out)
+
         mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
         self.register_buffer("causal_mask", mask, persistent=False)
 
@@ -101,7 +103,7 @@ class SimpleCausalTransformer(nn.Module):
 
         pos = torch.arange(seqlen, device=tokens.device)
         x = self.tok_emb(tokens) + self.pos_emb(pos)[None, :, :]
-        x = self.encoder(x, mask=self.causal_mask, is_causal=True)
+        x = self.encoder(x, mask=self.causal_mask)
         h = x[:, -1, :]
         return self.out(h)
 
@@ -130,8 +132,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
 
     return avg_loss.item(), acc.item()
 
+
 def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
-    """Constant 1.0 until cooldown, then cosine decay to 0.0 over cooldown span."""
     if cooldown_frac == 0.0:
         return 1.0
     x = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
@@ -140,8 +142,303 @@ def cosine_decay_schedule(s: float, cooldown_frac: float = 1.0) -> float:
         return 1.0
     if x < 1.0 - c:
         return 1.0
-    t = (x - (1.0 - c)) / max(c, 1e-8)  # normalized to [0,1]
+    t = (x - (1.0 - c)) / max(c, 1e-8)
     return 0.5 * (1.0 + math.cos(math.pi * t))
+
+
+def _clone_namespace(args: argparse.Namespace, **updates) -> argparse.Namespace:
+    d = vars(args).copy()
+    d.update(updates)
+    return argparse.Namespace(**d)
+
+
+def _maybe_reset_compile_cache() -> None:
+    dyn = getattr(torch, "_dynamo", None)
+    if dyn is not None and hasattr(dyn, "reset"):
+        dyn.reset()
+
+
+def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
+    if args.high_precision:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
+        torch.set_default_dtype(torch.float32)
+
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    device = torch.device(args.device)
+
+    run = None
+    if not args.no_wandb:
+        run = _wandb.init(
+            project=args.wandb_project,
+            config=vars(args),
+            group=args.wandb_group if args.wandb_group else None,
+            name=args.wandb_name if args.wandb_name else None,
+            reinit=True,
+        )
+
+    try:
+        train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
+
+        #noinspection PyTypeChecker
+        train_bs = int(min(args.batch_size, len(train_ds)))
+        eval_bs = 2048
+        train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
+        train_eval_loader = DataLoader(train_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
+        val_loader = DataLoader(val_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
+
+        model = SimpleCausalTransformer(
+            vocab_size=spec.vocab_size,
+            p_out=spec.p,
+            seq_len=spec.seq_len,
+            d_model=args.d_model,
+            nhead=args.nhead,
+            d_ff=args.d_ff,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+        ).to(device)
+
+        if not args.no_compile and hasattr(torch, "compile"):
+            model = torch.compile(model)
+
+        embed_ids = {id(p) for p in model.tok_emb.parameters()} | {id(p) for p in model.pos_emb.parameters()}
+        non_embedding_params = [p for p in model.parameters() if p.requires_grad and id(p) not in embed_ids]
+        print(f"non-embedding trainable params: {sum(p.numel() for p in non_embedding_params)}")
+
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.98))
+        loss_fn = nn.CrossEntropyLoss()
+
+        chance_acc = 1.0 / spec.p
+        chance_loss = -torch.log(torch.tensor(chance_acc, device="cpu")).item()
+
+        #noinspection PyTypeChecker
+        print(f"p={spec.p}  train={len(train_ds)}  val={len(val_ds)}  chance_acc={chance_acc:.6f}")
+        print(
+            f"model: num_layers={args.num_layers}  d_model={args.d_model}  nhead={args.nhead}  d_ff={args.d_ff}  "
+            f"opt=AdamW  lr={args.lr}  wd={args.weight_decay}"
+        )
+
+        t0 = time.time()
+        train_iter = iter(train_loader)
+        warmup_steps = min(max(int(args.lr_warmup_steps), 0), int(args.steps))
+
+        total_labels = 0
+        log_train_every = int(args.wandb_log_every)
+
+        ctx = nullcontext() if device.type == "cpu" or args.high_precision else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
+
+        x, y = next(train_iter)
+
+        profiler_skip_steps = 2
+
+        best_val_loss = float("inf")
+        best_val_acc = 0.0
+
+        for step in range(1, int(args.steps) + 1):
+            model.train()
+
+            B, _ = x.shape
+            total_labels += B
+
+            do_profile = (
+                args.profile_steps > 0
+                and (step <= args.profile_steps + profiler_skip_steps)
+                and step > profiler_skip_steps
+            )
+            prof_ctx = (
+                profile(
+                    activities=[
+                        ProfilerActivity.CPU,
+                        ProfilerActivity.CUDA if device.type == "cuda" else ProfilerActivity.CPU,
+                    ],
+                    record_shapes=True,
+                )
+                if do_profile
+                else nullcontext()
+            )
+
+            with ctx:
+                with prof_ctx as prof:
+                    logits = model(x)
+
+            try:
+                _x, _y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                _x, _y = next(train_iter)
+
+            if do_profile:
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
+
+            loss = loss_fn(logits, y)
+            train_loss_step = loss.detach().item()
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+
+            if warmup_steps > 0 and step <= warmup_steps:
+                lr_scale = step / warmup_steps
+            else:
+                lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
+            lr = args.lr * lr_scale
+            for pg in opt.param_groups:
+                pg["lr"] = lr
+            opt.step()
+
+            if step == 1 or step % args.eval_every == 0:
+                train_loss, train_acc = evaluate(model, train_eval_loader, device)
+                val_loss, val_acc = evaluate(model, val_loader, device)
+
+                best_val_loss = min(best_val_loss, val_loss)
+                best_val_acc = max(best_val_acc, val_acc)
+
+                dt = time.time() - t0
+                print(
+                    f"step={step:>7d}  "
+                    f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
+                    f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
+                    f"elapsed_s={dt:.1f}  "
+                    f"total_labels:{total_labels:,}  "
+                    f"lr={lr:.6f}  "
+                    f"lr_scale={lr_scale:.6f}"
+                )
+                if not args.no_wandb:
+                    _wandb.log(
+                        {
+                            "step": step,
+                            "train/loss": train_loss,
+                            "labels": total_labels,
+                            "train/acc": train_acc,
+                            "val/loss": val_loss,
+                            "val/acc": val_acc,
+                            "lr": lr,
+                            "lr_scale": lr_scale,
+                            "chance_loss": chance_loss,
+                        }
+                    )
+
+                if trial is not None:
+                    metric = val_acc if args.optuna_metric == "val_acc" else val_loss
+                    trial.report(metric, step)
+                    if trial.should_prune():
+                        import optuna
+                        raise optuna.TrialPruned()
+            elif step % log_train_every == 0:
+                if not args.no_wandb:
+                    _wandb.log(
+                        {
+                            "step": step,
+                            "train/loss": train_loss_step,
+                            "labels": total_labels,
+                            "lr": lr,
+                            "lr_scale": lr_scale,
+                            "chance_loss": chance_loss,
+                        }
+                    )
+
+            x, y = _x, _y
+
+        train_loss, train_acc = evaluate(model, train_eval_loader, device)
+        val_loss, val_acc = evaluate(model, val_loader, device)
+        print(f"final  train/loss={train_loss:.6f} train/acc={train_acc:.6f}  val/loss={val_loss:.6f} val/acc={val_acc:.6f}")
+
+        return {
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "best_val_loss": best_val_loss,
+            "best_val_acc": best_val_acc,
+        }
+    finally:
+        if run is not None:
+            _wandb.finish()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        gc.collect()
+        _maybe_reset_compile_cache()
+
+
+def run_optuna(args: argparse.Namespace) -> None:
+    try:
+        import optuna
+    except Exception as e:
+        raise RuntimeError("Optuna is not installed. pip install optuna") from e
+
+    direction = "maximize" if args.optuna_metric == "val_acc" else "minimize"
+
+    if args.optuna_sampler == "tpe":
+        sampler = optuna.samplers.TPESampler(seed=args.optuna_seed)
+    else:
+        sampler = optuna.samplers.RandomSampler(seed=args.optuna_seed)
+
+    if args.optuna_pruner == "median":
+        pruner = optuna.pruners.MedianPruner()
+    elif args.optuna_pruner == "hyperband":
+        pruner = optuna.pruners.HyperbandPruner()
+    else:
+        pruner = optuna.pruners.NopPruner()
+
+    storage = args.optuna_storage if args.optuna_storage else None
+    study = optuna.create_study(
+        study_name=args.optuna_study_name,
+        storage=storage,
+        load_if_exists=bool(storage),
+        direction=direction,
+        sampler=sampler,
+        pruner=pruner,
+    )
+
+    def objective(trial: "optuna.Trial") -> float:
+        nhead = trial.suggest_categorical("nhead", [2, 4, 8])
+        head_dim = trial.suggest_categorical("head_dim", [16, 32, 64])
+        d_model = int(nhead * head_dim)
+        d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
+        d_ff = int(d_model * d_ff_mult)
+
+        num_layers = trial.suggest_int("num_layers", 1, 4)
+        dropout = trial.suggest_float("dropout", 0.0, 0.3)
+        lr = trial.suggest_float("lr", 3e-4, 3e-3, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 0.0, 2.0)
+        lr_warmup_steps = trial.suggest_int("lr_warmup_steps", 0, 200)
+        cooldown_frac = trial.suggest_float("cooldown_frac", 0.0, 0.5)
+        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512, 1024])
+
+        trial_args = _clone_namespace(
+            args,
+            nhead=nhead,
+            d_model=d_model,
+            d_ff=d_ff,
+            num_layers=num_layers,
+            dropout=dropout,
+            lr=lr,
+            weight_decay=weight_decay,
+            lr_warmup_steps=lr_warmup_steps,
+            cooldown_frac=cooldown_frac,
+            batch_size=batch_size,
+            wandb_group=args.wandb_group if args.wandb_group else args.optuna_study_name,
+            wandb_name=args.wandb_name if args.wandb_name else f"trial_{trial.number}",
+        )
+
+        metrics = train_and_eval(trial_args, trial=trial)
+        return metrics["val_acc"] if args.optuna_metric == "val_acc" else metrics["val_loss"]
+
+    timeout = None if args.optuna_timeout_s <= 0 else float(args.optuna_timeout_s)
+    study.optimize(objective, n_trials=args.optuna_n_trials, timeout=timeout, gc_after_trial=True)
+
+    best = study.best_trial
+    best_d_model = int(best.params.get("nhead", 0) * best.params.get("head_dim", 0))
+    best_d_ff = int(best_d_model * best.params.get("d_ff_mult", 0))
+    print(f"best_trial={best.number}  value={study.best_value}")
+    print("best_params:")
+    for k, v in best.params.items():
+        print(f"  {k}: {v}")
+    print(f"derived: d_model={best_d_model}  d_ff={best_d_ff}")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -163,161 +460,32 @@ def main():
     ap.add_argument("--lr_warmup_steps", type=int, default=10, help="Linear warmup over first N steps of training.")
     ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
     ap.add_argument("--weight_decay", type=float, default=1.0, help="Weight decay coefficient (L2 penalty). Authors observed weight decay 1.0 achieved generalization in half the steps compared to no weight decay.")
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
-        if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     ap.add_argument("--profile_steps", type=int, default=0, help="Profile only the first N steps (0 = never). Skips first two steps.")
     ap.add_argument("--high_precision", action="store_true", help="Strict FP32 datatypes and matmul kernels.")
 
+    ap.add_argument("--no_compile", action="store_true")
+    ap.add_argument("--no_wandb", action="store_true")
+    ap.add_argument("--wandb_project", type=str, default="late_generalization")
+    ap.add_argument("--wandb_group", type=str, default="")
+    ap.add_argument("--wandb_name", type=str, default="")
+
+    ap.add_argument("--optuna", action="store_true")
+    ap.add_argument("--optuna_n_trials", type=int, default=50)
+    ap.add_argument("--optuna_timeout_s", type=int, default=0)
+    ap.add_argument("--optuna_storage", type=str, default="")
+    ap.add_argument("--optuna_study_name", type=str, default="late_generalization_optuna")
+    ap.add_argument("--optuna_sampler", type=str, default="tpe", choices=["tpe", "random"])
+    ap.add_argument("--optuna_pruner", type=str, default="none", choices=["none", "median", "hyperband"])
+    ap.add_argument("--optuna_metric", type=str, default="val_acc", choices=["val_acc", "val_loss"])
+    ap.add_argument("--optuna_seed", type=int, default=1337)
 
     args = ap.parse_args()
 
-    if args.high_precision:
-        # disallow TF32 for matmul and cuDNN convs
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-
-        # favor highest-precision FP32 matmul kernels
-        torch.set_float32_matmul_precision("highest")
-        torch.set_default_dtype(torch.float32)
-
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-    # ---------------------------------------------------- #
-
-    _wandb.init(project="late_generalization", config=vars(args))
-
-    device = torch.device(args.device)
-
-    train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
-
-    #noinspection PyTypeChecker
-    train_bs = min(args.batch_size, len(train_ds)) if args.p >= 23 else min(args.p**2*args.train_frac, args.batch_size)
-    eval_bs = 2048
-    train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
-    train_eval_loader = DataLoader(train_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
-
-    model = SimpleCausalTransformer(
-        vocab_size=spec.vocab_size,
-        p_out=spec.p,
-        seq_len=spec.seq_len,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        d_ff=args.d_ff,
-        num_layers=args.num_layers,
-        dropout = args.dropout,
-    ).to(device)
-    model = torch.compile(model)
-
-    # trainable params excluding embedding weights
-    embed_ids = {id(p) for p in model.tok_emb.parameters()} | {id(p) for p in model.pos_emb.parameters()}
-    non_embedding_params = [p for p in model.parameters() if p.requires_grad and id(p) not in embed_ids]
-    print(f"non-embedding trainable params: {sum(p.numel() for p in non_embedding_params)}")
-
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.98))
-
-    loss_fn = nn.CrossEntropyLoss()
-
-    chance_acc = 1.0/spec.p
-    chance_loss = -torch.log(torch.tensor(chance_acc, device='cpu')).item()
-
-    #noinspection PyTypeChecker
-    print(f"p={spec.p}  train={len(train_ds)}  val={len(val_ds)}  chance_acc={chance_acc:.6f}")
-    print(
-        f"model: num_layers={args.num_layers}  d_model={args.d_model}  nhead={args.nhead}  d_ff={args.d_ff}  "
-        f"opt=AdamW  lr={args.lr}  wd={args.weight_decay}"
-    )
-
-    t0 = time.time()
-    train_iter = iter(train_loader)
-    warmup_steps = min(args.lr_warmup_steps, args.steps)
-
-    total_labels = 0
-    log_train_every = args.wandb_log_every
-
-    ctx = nullcontext() if device.type == 'cpu' or args.high_precision else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
-
-    x, y = next(train_iter)
-
-    profiler_skip_steps = 2 # throw away first step which includes compilation
-
-    for step in range(1, args.steps + 1):
-        # -------------- train -------------- #
-        model.train()
-
-        B, _ = x.shape
-        total_labels += B
-
-        do_profile = (args.profile_steps > 0 and (step <= args.profile_steps+profiler_skip_steps) and step > profiler_skip_steps)
-        prof_ctx = (
-            profile(
-                activities=[
-                    ProfilerActivity.CPU,
-                    ProfilerActivity.CUDA if device.type == "cuda" else ProfilerActivity.CPU,
-                ],
-                record_shapes=True,
-            )
-            if do_profile
-            else nullcontext()
-        )
-
-        with ctx:
-            with prof_ctx as prof:
-                logits = model(x)
-
-        # prefetch next batch
-        try:
-            _x, _y = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_loader)
-            _x, _y = next(train_iter)
-
-        if do_profile:
-            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
-
-        loss = loss_fn(logits, y)
-
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-
-        # calculate learning rate
-        if step <= warmup_steps:
-            lr_scale = step / warmup_steps
-        else:
-            lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
-        lr =  args.lr * lr_scale
-        for pg in opt.param_groups: pg["lr"] = lr
-        opt.step()
-
-
-        # -------------- eval -------------- #
-        if step == 1 or step % args.eval_every == 0:
-            train_loss, train_acc = evaluate(model, train_eval_loader, device)
-            val_loss, val_acc = evaluate(model, val_loader, device)
-            dt = time.time() - t0
-            print(
-                f"step={step:>7d}  "
-                f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
-                f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
-                f"elapsed_s={dt:.1f}  "
-                f"total_labels:{total_labels:,}  "
-                f"lr={lr:.6f}  "
-                f"lr_scale={lr_scale:.6f}"
-            )
-            _wandb.log({"step": step, "train/loss": train_loss, "labels":total_labels, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
-        elif step % log_train_every == 0:
-            train_loss = loss.detach().item()
-            _wandb.log({"step": step, "train/loss": train_loss, "labels":total_labels, "lr":lr, "lr_scale":lr_scale, "chance_loss": chance_loss})
-
-        # next batch
-        x, y = _x, _y
-
-    _wandb.finish()
-
-    train_loss, train_acc = evaluate(model, train_eval_loader, device)
-    val_loss, val_acc = evaluate(model, val_loader, device)
-    print(f"final  train/loss={train_loss:.6f} train/acc={train_acc:.6f}  val/loss={val_loss:.6f} val/acc={val_acc:.6f}")
+    if args.optuna:
+        run_optuna(args)
+    else:
+        train_and_eval(args)
 
 
 if __name__ == "__main__":
