@@ -92,9 +92,6 @@ class SimpleCausalTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, norm=nn.LayerNorm(d_model))
         self.out = nn.Linear(d_model, p_out)
 
-        mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
-        self.register_buffer("causal_mask", mask, persistent=False)
-
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         bsz, seqlen = tokens.shape
         if seqlen != self.seq_len:
@@ -102,7 +99,7 @@ class SimpleCausalTransformer(nn.Module):
 
         pos = torch.arange(seqlen, device=tokens.device)
         x = self.tok_emb(tokens) + self.pos_emb(pos)[None, :, :]
-        x = self.encoder(x, mask=self.causal_mask)
+        x = self.encoder(x, is_causal=True)
         h = x[:, -1, :]
         return self.out(h)
 
