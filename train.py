@@ -154,7 +154,7 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps.")
     ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
-    ap.add_argument("--batch_size", type=int, default=512, help="Batch size. We use min(batch_size,p^2*train_frac).")
+    ap.add_argument("--batch_size", type=int, default=512, help="Requested batch size. We use min(batch_size,p^2*train_frac).")
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
@@ -162,7 +162,7 @@ def main():
     ap.add_argument("--num_layers", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.1, help="Dropout probability in Transformer layers (0.0 disables).")
 
-    ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--lr_warmup_steps", type=int, default=10, help="Linear warmup over first N steps of training.")
     ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
     ap.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay coefficient (L2 penalty). Authors observed weight decay 1.0 achieved generalization in half the steps compared to no weight decay.")
@@ -218,7 +218,7 @@ def main():
     non_embedding_params = [p for p in model.parameters() if p.requires_grad and id(p) not in embed_ids]
     print(f"non-embedding trainable params: {sum(p.numel() for p in non_embedding_params)}")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.98))
 
     loss_fn = nn.CrossEntropyLoss()
 
