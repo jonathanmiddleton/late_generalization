@@ -302,7 +302,7 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                     f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                     f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                     f"elapsed_s={dt:.1f}  "
-                    f"total_labels:{total_labels:,}  "
+                    f"total_labels:={total_labels:,}  "
                     f"lr={lr:.6f}  "
                     f"lr_scale={lr_scale:.6f}"
                 )
