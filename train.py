@@ -153,7 +153,7 @@ def main():
     ap.add_argument("--nhead", type=int, default=4)
     ap.add_argument("--d_ff", type=int, default=512)
 
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps"
