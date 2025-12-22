@@ -146,7 +146,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps. Note: we val/log the fir")
-    ap.add_argument("--log_train_every", type=int, default=50, help="Log training loss every N steps.")
+    ap.add_argument("--wandb_log_every", type=int, default=50, help="Log training loss every N steps to wandb.")
     ap.add_argument("--batch_size", type=int, default=1024)
 
     ap.add_argument("--d_model", type=int, default=128)
@@ -216,7 +216,7 @@ def main():
     train_iter = iter(train_loader)
     tokens_per_step = args.batch_size * spec.seq_len
     cum_tokens = 0
-    log_train_every = args.log_train_every
+    log_train_every = args.wandb_log_every
 
     ctx = nullcontext() if device.type == 'cpu' or args.high_precision else torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
 
@@ -272,14 +272,13 @@ def main():
                 f"step={step:>7d}  "
                 f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                 f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
-                f"elapsed_s={dt:.1f}"
+                f"elapsed_s={dt:.1f}  "
                 f"cum_tokens:{cum_tokens}"
             )
-            _wandb.log({"train/loss": train_loss, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "cum_tokens":cum_tokens})
+            _wandb.log({"train/loss": train_loss, "train/acc": train_acc, "val/loss": val_loss, "val/acc": val_acc, "lr":lr, "tokens":cum_tokens})
         elif step % log_train_every == 0:
             train_loss = loss.detach().item()
-            print(f"step={step:>7d} train/loss: {train_loss:.6f}, cum_tokens={cum_tokens}")
-            _wandb.log({"step": step, "train/loss": train_loss, "cum_tokens":cum_tokens})
+            _wandb.log({"step": step, "train/loss": train_loss, "tokens":cum_tokens})
 
     train_loss, train_acc = evaluate(model, train_eval_loader, device)
     val_loss, val_acc = evaluate(model, val_loader, device)
