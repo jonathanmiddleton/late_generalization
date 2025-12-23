@@ -1,9 +1,11 @@
 import argparse
 import time
+import math
+import gc
+import statistics
+from collections import defaultdict
 from dataclasses import dataclass
 from contextlib import nullcontext
-import gc
-import math
 
 import wandb as _wandb
 
@@ -158,7 +160,25 @@ def _maybe_reset_compile_cache() -> None:
         dyn.reset()
 
 
+_PRUNE_HISTORY = defaultdict(list)
+
+
+def _median_prune(step: int, val_loss: float, args: argparse.Namespace) -> bool:
+    if not args.optuna_prune_median:
+        return False
+    if step < args.optuna_prune_warmup_steps:
+        return False
+    past = _PRUNE_HISTORY.get(step, [])
+    if len(past) < args.optuna_prune_min_trials:
+        return False
+    med = statistics.median(past)
+    return val_loss > med * (1.0 + args.optuna_prune_margin)
+
+
 def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
+    if args.d_model % args.nhead != 0:
+        raise ValueError(f"d_model must be divisible by nhead (got d_model={args.d_model}, nhead={args.nhead})")
+
     if args.high_precision:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
@@ -178,14 +198,18 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
             config=vars(args),
             group=args.wandb_group if args.wandb_group else None,
             name=args.wandb_name if args.wandb_name else None,
-            finish_previous=True,
+            reinit=True,
         )
 
     try:
         train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
 
-        #noinspection PyTypeChecker
-        train_bs = int(min(args.batch_size, len(train_ds)//2))
+        if args.p >= 23:
+            #noinspection PyTypeChecker
+            train_bs = int(min(args.batch_size, len(train_ds)))
+        else:
+            train_bs = int(min(max(1, int(args.p * args.p * args.train_frac)), args.batch_size))
+
         eval_bs = 2048
         train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
         train_eval_loader = DataLoader(train_ds, batch_size=eval_bs, shuffle=False, num_workers=0)
@@ -237,6 +261,8 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
 
         best_val_loss = float("inf")
         best_val_acc = 0.0
+        steps_to_target = None
+        steps_ran = int(args.steps)
 
         for step in range(1, int(args.steps) + 1):
             model.train()
@@ -275,7 +301,7 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                 print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
 
             loss = loss_fn(logits, y)
-            train_loss_step = loss.detach().item()
+            train_loss_step = float(loss.detach().item())
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -284,6 +310,7 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                 lr_scale = step / warmup_steps
             else:
                 lr_scale = cosine_decay_schedule(step / args.steps, args.cooldown_frac)
+
             lr = args.lr * lr_scale
             for pg in opt.param_groups:
                 pg["lr"] = lr
@@ -293,8 +320,12 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                 train_loss, train_acc = evaluate(model, train_eval_loader, device)
                 val_loss, val_acc = evaluate(model, val_loader, device)
 
-                best_val_loss = min(best_val_loss, val_loss)
-                best_val_acc = max(best_val_acc, val_acc)
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_val_acc = val_acc
+
+                if steps_to_target is None and args.optuna_target_val_loss > 0.0 and val_loss <= args.optuna_target_val_loss:
+                    steps_to_target = step
 
                 dt = time.time() - t0
                 print(
@@ -302,10 +333,11 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                     f"train/loss={train_loss:.6f} train/acc={train_acc:.6f}  "
                     f"val/loss={val_loss:.6f} val/acc={val_acc:.6f}  "
                     f"elapsed_s={dt:.1f}  "
-                    f"total_labels:={total_labels:,}  "
+                    f"total_labels:{total_labels:,}  "
                     f"lr={lr:.6f}  "
                     f"lr_scale={lr_scale:.6f}"
                 )
+
                 if not args.no_wandb:
                     _wandb.log(
                         {
@@ -318,41 +350,61 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                             "lr": lr,
                             "lr_scale": lr_scale,
                             "chance_loss": chance_loss,
+                            "best/val_loss": best_val_loss,
+                            "target/val_loss": args.optuna_target_val_loss,
+                            "steps_to_target": -1 if steps_to_target is None else int(steps_to_target),
                         }
                     )
 
                 if trial is not None:
-                    metric = val_acc if args.optuna_metric == "val_acc" else val_loss
-                    trial.report(metric, step)
-                    if trial.should_prune():
-                        import optuna
-                        raise optuna.TrialPruned()
-            elif step % log_train_every == 0:
-                if not args.no_wandb:
-                    _wandb.log(
-                        {
-                            "step": step,
-                            "train/loss": train_loss_step,
-                            "labels": total_labels,
-                            "lr": lr,
-                            "lr_scale": lr_scale,
-                            "chance_loss": chance_loss,
-                        }
-                    )
+                    do_prune = _median_prune(step, float(val_loss), args)
+                    _PRUNE_HISTORY[step].append(float(val_loss))
+
+                    if do_prune:
+                        if args.optuna_prune_action == "prune":
+                            import optuna
+                            trial.set_user_attr("pruned_at_step", int(step))
+                            trial.set_user_attr("pruned_val_loss", float(val_loss))
+                            raise optuna.TrialPruned()
+                        else:
+                            steps_ran = step
+                            break
+            elif step % log_train_every == 0 and not args.no_wandb:
+                _wandb.log(
+                    {
+                        "step": step,
+                        "train/loss": train_loss_step,
+                        "labels": total_labels,
+                        "lr": lr,
+                        "lr_scale": lr_scale,
+                        "chance_loss": chance_loss,
+                    }
+                )
 
             x, y = _x, _y
 
         train_loss, train_acc = evaluate(model, train_eval_loader, device)
         val_loss, val_acc = evaluate(model, val_loader, device)
+
+        if trial is not None:
+            trial.set_user_attr("steps_ran", int(steps_ran))
+            trial.set_user_attr("final_val_loss", float(val_loss))
+            trial.set_user_attr("final_val_acc", float(val_acc))
+            trial.set_user_attr("best_val_loss", float(best_val_loss))
+            trial.set_user_attr("best_val_acc", float(best_val_acc))
+            trial.set_user_attr("steps_to_target", -1 if steps_to_target is None else int(steps_to_target))
+
         print(f"final  train/loss={train_loss:.6f} train/acc={train_acc:.6f}  val/loss={val_loss:.6f} val/acc={val_acc:.6f}")
 
         return {
-            "train_loss": train_loss,
-            "train_acc": train_acc,
-            "val_loss": val_loss,
-            "val_acc": val_acc,
-            "best_val_loss": best_val_loss,
-            "best_val_acc": best_val_acc,
+            "train_loss": float(train_loss),
+            "train_acc": float(train_acc),
+            "val_loss": float(val_loss),
+            "val_acc": float(val_acc),
+            "best_val_loss": float(best_val_loss),
+            "best_val_acc": float(best_val_acc),
+            "steps_ran": float(steps_ran),
+            "steps_to_target": float(-1 if steps_to_target is None else steps_to_target),
         }
     finally:
         if run is not None:
@@ -369,38 +421,31 @@ def run_optuna(args: argparse.Namespace) -> None:
     except Exception as e:
         raise RuntimeError("Optuna is not installed. pip install optuna") from e
 
-    direction = "maximize" if args.optuna_metric == "val_acc" else "minimize"
+    storage = args.optuna_storage if args.optuna_storage else None
 
-    if args.optuna_sampler == "tpe":
+    if args.optuna_sampler == "nsga2":
+        sampler = optuna.samplers.NSGAIISampler(seed=args.optuna_seed)
+    elif args.optuna_sampler == "tpe":
         sampler = optuna.samplers.TPESampler(seed=args.optuna_seed)
     else:
         sampler = optuna.samplers.RandomSampler(seed=args.optuna_seed)
 
-    if args.optuna_pruner == "median":
-        pruner = optuna.pruners.MedianPruner()
-    elif args.optuna_pruner == "hyperband":
-        pruner = optuna.pruners.HyperbandPruner()
-    else:
-        pruner = optuna.pruners.NopPruner()
-
-    storage = args.optuna_storage if args.optuna_storage else None
     study = optuna.create_study(
         study_name=args.optuna_study_name,
-        storage=run_optunastorage,
+        storage=storage,
         load_if_exists=bool(storage),
-        direction=direction,
+        directions=["minimize", "minimize"],
         sampler=sampler,
-        pruner=pruner,
     )
 
-    def objective(trial: "optuna.Trial") -> float:
+    def objective(trial: "optuna.Trial"):
         nhead = trial.suggest_categorical("nhead", [2, 4, 8])
         head_dim = trial.suggest_categorical("head_dim", [16, 32, 64])
         d_model = int(nhead * head_dim)
         d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
         d_ff = int(d_model * d_ff_mult)
 
-        num_layers = trial.suggest_int("num_layers", 1, 2)
+        num_layers = trial.suggest_int("num_layers", 1, 4)
         dropout = trial.suggest_float("dropout", 0.0, 0.3)
         lr = trial.suggest_float("lr", 3e-4, 3e-3, log=True)
         weight_decay = trial.suggest_float("weight_decay", 0.0, 2.0)
@@ -425,44 +470,50 @@ def run_optuna(args: argparse.Namespace) -> None:
         )
 
         metrics = train_and_eval(trial_args, trial=trial)
-        return metrics["val_acc"] if args.optuna_metric == "val_acc" else metrics["val_loss"]
+
+        final_val_loss = float(metrics["val_loss"])
+        stt = int(metrics["steps_to_target"])
+        if stt < 0:
+            stt = int(args.steps + args.eval_every)
+
+        return final_val_loss, stt
 
     timeout = None if args.optuna_timeout_s <= 0 else float(args.optuna_timeout_s)
     study.optimize(objective, n_trials=args.optuna_n_trials, timeout=timeout, gc_after_trial=True)
 
-    best = study.best_trial
-    best_d_model = int(best.params.get("nhead", 0) * best.params.get("head_dim", 0))
-    best_d_ff = int(best_d_model * best.params.get("d_ff_mult", 0))
-    print(f"best_trial={best.number}  value={study.best_value}")
-    print("best_params:")
-    for k, v in best.params.items():
-        print(f"  {k}: {v}")
-    print(f"derived: d_model={best_d_model}  d_ff={best_d_ff}")
+    pareto = study.best_trials
+    print(f"pareto_front_size={len(pareto)}")
+    # noinspection PyShadowingNames
+    pareto_sorted = sorted(pareto, key=lambda t: (t.values[1], t.values[0]))
+    for t in pareto_sorted[: min(len(pareto_sorted), args.optuna_print_pareto)]:
+        v0, v1 = t.values
+        print(f"trial={t.number}  final_val_loss={v0:.6f}  steps_to_target={int(v1)}  params={t.params}")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p", type=int, default=97, help="(prime) modulus of the operation")
+    ap.add_argument("--p", type=int, default=97)
     ap.add_argument("--train_frac", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1337)
-    ap.add_argument("--steps", type=int, default=100_000, help="Total number of training steps. For Optuna, a reasonable choice is ~250 steps per trial.")
-    ap.add_argument("--eval_every", type=int, default=250, help="Evaluate every N steps. For Optuna, a reasonable choice is ~50 steps.")
-    ap.add_argument("--wandb_log_every", type=int, default=250, help="Log training loss every N steps to wandb.")
-    ap.add_argument("--batch_size", type=int, default=512, help="Requested batch size.")
+    ap.add_argument("--steps", type=int, default=100_000)
+    ap.add_argument("--eval_every", type=int, default=250)
+    ap.add_argument("--wandb_log_every", type=int, default=250)
+    ap.add_argument("--batch_size", type=int, default=512)
 
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--nhead", type=int, default=4)
     ap.add_argument("--d_ff", type=int, default=512)
     ap.add_argument("--num_layers", type=int, default=2)
-    ap.add_argument("--dropout", type=float, default=0.1, help="Dropout probability in Transformer layers (0.0 disables).")
+    ap.add_argument("--dropout", type=float, default=0.1)
 
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--lr_warmup_steps", type=int, default=10, help="Linear warmup over first N steps of training.")
-    ap.add_argument("--cooldown_frac", type=float, default=0.0, help="Fraction of training to cooldown for (0.0 = no cooldown).")
-    ap.add_argument("--weight_decay", type=float, default=1.0, help="Weight decay coefficient (L2 penalty). Authors observed weight decay 1.0 achieved generalization in half the steps compared to no weight decay.")
+    ap.add_argument("--lr_warmup_steps", type=int, default=10)
+    ap.add_argument("--cooldown_frac", type=float, default=0.0)
+    ap.add_argument("--weight_decay", type=float, default=1.0)
+
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-    ap.add_argument("--profile_steps", type=int, default=0, help="Profile only the first N steps (0 = never). Skips first two steps.")
-    ap.add_argument("--high_precision", action="store_true", help="Strict FP32 datatypes and matmul kernels.")
+    ap.add_argument("--profile_steps", type=int, default=0)
+    ap.add_argument("--high_precision", action="store_true")
 
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--no_wandb", action="store_true")
@@ -474,16 +525,24 @@ def main():
     ap.add_argument("--optuna_n_trials", type=int, default=50)
     ap.add_argument("--optuna_timeout_s", type=int, default=0)
     ap.add_argument("--optuna_storage", type=str, default="")
-    ap.add_argument("--optuna_study_name", type=str, default="late_generalization_optuna")
-    ap.add_argument("--optuna_sampler", type=str, default="tpe", choices=["tpe", "random"])
-    ap.add_argument("--optuna_pruner", type=str, default="none", choices=["none", "median", "hyperband"])
-    ap.add_argument("--optuna_metric", type=str, default="val_acc", choices=["val_acc", "val_loss"])
+    ap.add_argument("--optuna_study_name", type=str, default="late_generalization_mo")
+    ap.add_argument("--optuna_sampler", type=str, default="nsga2", choices=["nsga2", "tpe", "random"])
     ap.add_argument("--optuna_seed", type=int, default=1337)
+
+    ap.add_argument("--optuna_target_val_loss", type=float, default=1e-3)
+
+    ap.add_argument("--optuna_prune_median", action="store_true")
+    ap.add_argument("--optuna_prune_action", type=str, default="stop", choices=["prune", "stop"])
+    ap.add_argument("--optuna_prune_warmup_steps", type=int, default=0)
+    ap.add_argument("--optuna_prune_min_trials", type=int, default=10)
+    ap.add_argument("--optuna_prune_margin", type=float, default=0.0)
+
+    ap.add_argument("--optuna_print_pareto", type=int, default=20)
 
     args = ap.parse_args()
 
     if args.optuna:
-        (args)
+        run_optuna(args)
     else:
         train_and_eval(args)
 
