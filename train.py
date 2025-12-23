@@ -439,7 +439,7 @@ def run_optuna(args: argparse.Namespace) -> None:
     )
 
     def objective(trial: "optuna.Trial"):
-        nhead = trial.suggest_categorical("nhead", [2, 4, 8])
+        nhead = trial.suggest_categorical("nhead", [8])
         head_dim = trial.suggest_categorical("head_dim", [16, 32, 64])
         d_model = int(nhead * head_dim)
         d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
@@ -448,10 +448,11 @@ def run_optuna(args: argparse.Namespace) -> None:
         num_layers = trial.suggest_int("num_layers", 1, 4)
         dropout = trial.suggest_float("dropout", 0.0, 0.3)
         lr = trial.suggest_float("lr", 3e-4, 3e-3, log=True)
-        weight_decay = trial.suggest_float("weight_decay", 0.0, 2.0)
-        lr_warmup_steps = trial.suggest_int("lr_warmup_steps", 0, 200)
-        cooldown_frac = trial.suggest_float("cooldown_frac", 0.0, 0.5)
-        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512, 1024])
+        weight_decay = trial.suggest_float("weight_decay", 0.5, 2.0)
+        # lr_warmup_steps = trial.suggest_int("lr_warmup_steps", 0, 200)
+        lr_warmup_steps = 100
+        cooldown_frac = trial.suggest_float("cooldown_frac", 0.2, 0.5)
+        batch_size = trial.suggest_categorical("batch_size", [512, 1024])
 
         trial_args = _clone_namespace(
             args,
