@@ -176,7 +176,7 @@ _PRUNE_HISTORY = defaultdict(list)
 
 
 def _median_prune(step: int, val_acc: float, args: argparse.Namespace) -> bool:
-    if args.optuna_prune_median_off:
+    if args.optuna_prune_median_off or step <= 1:
         return False
     if step < args.optuna_prune_warmup_steps:
         return False
@@ -384,7 +384,7 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                     for cb in callbacks:
                         cb(event)
 
-                if trial is not None:
+                if trial is not None and step > 1:
                     do_prune = _median_prune(step, float(val_acc), args)
                     _PRUNE_HISTORY[step].append(float(val_acc))
 
@@ -511,6 +511,7 @@ def run_optuna(args: argparse.Namespace) -> None:
         trial_args = _clone_namespace(
             args,
             eval_every=args.optuna_eval_every,
+            steps=args.optuna_steps,
             nhead=nhead,
             d_model=d_model,
             d_ff=d_ff,
@@ -581,6 +582,7 @@ def main():
     ap.add_argument("--optuna_seed", type=int, default=1337)
     ap.add_argument("--optuna_target_val_acc", type=float, default=1.0)
     ap.add_argument("--optuna_prune_median_off", action="store_true", default=False, help="Disable median-based pruning.")
+    ap.add_argument("--optuna_steps", type=int, default=1000, help="Number of steps per trial.")
     ap.add_argument("--optuna_prune_action", type=str, default="prune", choices=["prune", "stop"])
     ap.add_argument("--optuna_prune_warmup_steps", type=int, default=0)
     ap.add_argument("--optuna_prune_min_trials", type=int, default=10)
