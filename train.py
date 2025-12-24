@@ -338,7 +338,7 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                     best_val_loss = val_loss
                     best_val_acc = val_acc
 
-                if steps_to_target is None and args.optuna_target_val_loss > 0.0 and val_loss <= args.optuna_target_val_loss:
+                if steps_to_target is None and val_loss <= args.optuna_target_val_loss:
                     steps_to_target = step
 
                 dt = time.time() - t0
@@ -584,7 +584,7 @@ def main():
     ap.add_argument("--optuna_prune_action", type=str, default="prune", choices=["prune", "stop"])
     ap.add_argument("--optuna_prune_warmup_steps", type=int, default=0)
     ap.add_argument("--optuna_prune_min_trials", type=int, default=10)
-    ap.add_argument("--optuna_prune_margin", type=float, default=0.0)
+    ap.add_argument("--optuna_prune_margin", type=float, default=0.02, help="Scalar applied to median for prune margin.")
 
     args = ap.parse_args()
 
