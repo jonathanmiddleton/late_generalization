@@ -456,10 +456,9 @@ def run_optuna(args: argparse.Namespace) -> None:
         cooldown_frac = trial.suggest_float("cooldown_frac", 0.2, 0.5)
         batch_size = trial.suggest_categorical("batch_size", [512, 1024])
 
-        args.val_every = args.optuna_val_every
-
         trial_args = _clone_namespace(
             args,
+            eval_every = args.optuna_eval_every,
             nhead=nhead,
             d_model=d_model,
             d_ff=d_ff,
@@ -529,7 +528,7 @@ def main():
     ap.add_argument("--optuna", action="store_true")
     ap.add_argument("--optuna_n_trials", type=int, default=50)
     ap.add_argument("--optuna_timeout_s", type=int, default=0)
-    ap.add_argument("--optuna_val_every", type=int, default=50)
+    ap.add_argument("--optuna_eval_every", type=int, default=50)
     ap.add_argument("--optuna_storage", type=str, default="")
     ap.add_argument("--optuna_study_name", type=str, default="late_generalization_mo")
     ap.add_argument("--optuna_sampler", type=str, default="nsga2", choices=["nsga2", "tpe", "random"])
