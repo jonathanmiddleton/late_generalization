@@ -365,6 +365,7 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                             "lr_scale": lr_scale,
                             "chance_loss": chance_loss,
                             "best/val_loss": best_val_loss,
+                            "best/val_acc": best_val_acc,
                             "target/val_loss": args.optuna_target_val_loss,
                             "steps_to_target": -1 if steps_to_target is None else int(steps_to_target),
                         }
@@ -584,8 +585,6 @@ def main():
     ap.add_argument("--optuna_prune_warmup_steps", type=int, default=0)
     ap.add_argument("--optuna_prune_min_trials", type=int, default=10)
     ap.add_argument("--optuna_prune_margin", type=float, default=0.0)
-
-    ap.add_argument("--optuna_print_pareto", type=int, default=20)
 
     args = ap.parse_args()
 
