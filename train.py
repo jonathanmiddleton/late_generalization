@@ -340,7 +340,7 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                 if  val_acc < best_val_acc:
                     best_val_acc = val_acc
 
-                if steps_to_target is None and val_acc <= args.optuna_target_val_acc:
+                if steps_to_target is None and val_acc >= args.optuna_target_val_acc:
                     steps_to_target = step
 
                 dt = time.time() - t0
