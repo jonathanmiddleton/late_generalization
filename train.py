@@ -440,8 +440,8 @@ def run_optuna(args: argparse.Namespace) -> None:
     )
 
     def objective(trial: optuna.Trial):
-        nhead = trial.suggest_categorical("nhead", [8])
-        head_dim = trial.suggest_categorical("head_dim", [16, 32, 64])
+        nhead = trial.suggest_categorical("nhead", [4, 8])
+        head_dim = trial.suggest_categorical("head_dim", [32, 64, 128])
         d_model = int(nhead * head_dim)
         d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
         d_ff = int(d_model * d_ff_mult)
@@ -453,8 +453,8 @@ def run_optuna(args: argparse.Namespace) -> None:
         weight_decay = trial.suggest_float("weight_decay", 0.5, 2.0)
         # lr_warmup_steps = trial.suggest_int("lr_warmup_steps", 0, 200)
         lr_warmup_steps = 100
-        cooldown_frac = trial.suggest_float("cooldown_frac", 0.2, 0.5)
-        batch_size = trial.suggest_categorical("batch_size", [512, 1024])
+        # cooldown_frac = trial.suggest_float("cooldown_frac", 0.0, 1.0)
+        batch_size = trial.suggest_int("batch_size", 64, 1024)
 
         trial_args = _clone_namespace(
             args,
@@ -467,7 +467,7 @@ def run_optuna(args: argparse.Namespace) -> None:
             lr=lr,
             weight_decay=weight_decay,
             lr_warmup_steps=lr_warmup_steps,
-            cooldown_frac=cooldown_frac,
+            # cooldown_frac=cooldown_frac,
             batch_size=batch_size,
             wandb_group=args.wandb_group if args.wandb_group else args.optuna_study_name,
             wandb_name=args.wandb_name if args.wandb_name else f"trial_{trial.number}",
