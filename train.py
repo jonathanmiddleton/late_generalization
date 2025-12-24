@@ -337,7 +337,7 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
 
-                if  val_acc < best_val_acc:
+                if  val_acc > best_val_acc:
                     best_val_acc = val_acc
 
                 if steps_to_target is None and val_acc >= args.optuna_target_val_acc:
