@@ -572,17 +572,15 @@ def main():
     ap.add_argument("--wandb_name", type=str, default="")
 
     ap.add_argument("--optuna", action="store_true")
-    ap.add_argument("--optuna_n_trials", type=int, default=50)
+    ap.add_argument("--optuna_n_trials", type=int, default=100)
     ap.add_argument("--optuna_timeout_s", type=int, default=0)
-    ap.add_argument("--optuna_eval_every", type=int, default=50)
+    ap.add_argument("--optuna_eval_every", type=int, default=25)
     ap.add_argument("--optuna_storage", type=str, default="")
     ap.add_argument("--optuna_study_name", type=str, default="late_generalization_mo")
     ap.add_argument("--optuna_sampler", type=str, default="tpe", choices=["nsga2", "tpe", "random"])
     ap.add_argument("--optuna_seed", type=int, default=1337)
-
     ap.add_argument("--optuna_target_val_acc", type=float, default=1.0)
-
-    ap.add_argument("--optuna_prune_median_off", action="store_true", default=False)
+    ap.add_argument("--optuna_prune_median_off", action="store_true", default=False, help="Disable median-based pruning.")
     ap.add_argument("--optuna_prune_action", type=str, default="prune", choices=["prune", "stop"])
     ap.add_argument("--optuna_prune_warmup_steps", type=int, default=0)
     ap.add_argument("--optuna_prune_min_trials", type=int, default=10)
