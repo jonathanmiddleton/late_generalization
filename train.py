@@ -6,6 +6,7 @@ import statistics
 from collections import defaultdict
 from dataclasses import dataclass
 from contextlib import nullcontext
+from typing import Callable, Optional
 
 import wandb as _wandb
 
@@ -14,6 +15,16 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torch.profiler import profile, ProfilerActivity
 
+@dataclass(frozen=True)
+class EvalEvent:
+    step: int
+    train_loss: float
+    train_acc: float
+    val_loss: float
+    val_acc: float
+
+
+EvalCallback = Callable[[EvalEvent], None]
 
 @dataclass(frozen=True)
 class ModOpSpec:
@@ -176,7 +187,7 @@ def _median_prune(step: int, val_loss: float, args: argparse.Namespace) -> bool:
     return val_loss > med * (1.0 + args.optuna_prune_margin)
 
 
-def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
+def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[list[EvalCallback]] = None) -> dict[str, float]:
     if args.d_model % args.nhead != 0:
         raise ValueError(f"d_model must be divisible by nhead (got d_model={args.d_model}, nhead={args.nhead})")
 
@@ -201,6 +212,8 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
             name=args.wandb_name if args.wandb_name else None,
             reinit=True,
         )
+
+    callbacks: list[EvalCallback] = [] if on_eval is None else list(on_eval)
 
     try:
         train_ds, val_ds, spec = make_mod_add_split(p=args.p, train_frac=args.train_frac, seed=args.seed, device=device)
@@ -357,6 +370,17 @@ def train_and_eval(args: argparse.Namespace, trial=None) -> dict[str, float]:
                         }
                     )
 
+                if callbacks:
+                    event = EvalEvent(
+                        step=int(step),
+                        train_loss=float(train_loss),
+                        train_acc=float(train_acc),
+                        val_loss=float(val_loss),
+                        val_acc=float(val_acc),
+                    )
+                    for cb in callbacks:
+                        cb(event)
+
                 if trial is not None:
                     do_prune = _median_prune(step, float(val_loss), args)
                     _PRUNE_HISTORY[step].append(float(val_loss))
@@ -435,30 +459,55 @@ def run_optuna(args: argparse.Namespace) -> None:
         study_name=args.optuna_study_name,
         storage=storage,
         load_if_exists=bool(storage),
-        directions=["minimize", "minimize"],
+        direction="minimize",
         sampler=sampler,
     )
 
+    best_steps_to_100: int | None = None
+
     def objective(trial: optuna.Trial):
+        nonlocal best_steps_to_100
+
         nhead = trial.suggest_categorical("nhead", [4, 8])
         head_dim = trial.suggest_categorical("head_dim", [32, 64, 128])
         d_model = int(nhead * head_dim)
         d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
         d_ff = int(d_model * d_ff_mult)
 
-        # num_layers = trial.suggest_int("num_layers", 1, 4)
         num_layers = 2
         dropout = trial.suggest_float("dropout", 0.0, 0.3)
         lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         weight_decay = trial.suggest_float("weight_decay", 0.5, 2.0)
-        # lr_warmup_steps = trial.suggest_int("lr_warmup_steps", 0, 200)
         lr_warmup_steps = 100
-        # cooldown_frac = trial.suggest_float("cooldown_frac", 0.0, 1.0)
         batch_size = trial.suggest_int("batch_size", 64, 1024)
+
+        # Prune if we are "too late" compared to the best known solution (20% slack by default).
+        prune_slack = 0.20
+        acc_target = 1.0
+        acc_tol = 1e-8  # epsilon
+
+        def optuna_eval_hook(ev: EvalEvent) -> None:
+            nonlocal best_steps_to_100
+
+            trial.report(ev.val_acc, step=ev.step)
+
+            hit_target = ev.val_acc >= (acc_target - acc_tol)
+            if hit_target:
+                trial.set_user_attr("steps_to_100_val_acc", int(ev.step))
+                if best_steps_to_100 is None or ev.step < best_steps_to_100:
+                    best_steps_to_100 = int(ev.step)
+                return
+
+            if best_steps_to_100 is not None:
+                latest_allowed = int(math.floor(best_steps_to_100 * (1.0 + prune_slack)))
+                if ev.step >= latest_allowed:
+                    raise optuna.TrialPruned(
+                        f"too slow: step={ev.step} best={best_steps_to_100} slack={prune_slack}"
+                    )
 
         trial_args = _clone_namespace(
             args,
-            eval_every = args.optuna_eval_every,
+            eval_every=args.optuna_eval_every,
             nhead=nhead,
             d_model=d_model,
             d_ff=d_ff,
@@ -467,31 +516,25 @@ def run_optuna(args: argparse.Namespace) -> None:
             lr=lr,
             weight_decay=weight_decay,
             lr_warmup_steps=lr_warmup_steps,
-            # cooldown_frac=cooldown_frac,
             batch_size=batch_size,
             wandb_group=args.wandb_group if args.wandb_group else args.optuna_study_name,
             wandb_name=args.wandb_name if args.wandb_name else f"trial_{trial.number}",
         )
 
-        metrics = train_and_eval(trial_args, trial=trial)
+        _ = train_and_eval(trial_args, trial=trial, on_eval=[optuna_eval_hook])
 
-        final_val_loss = float(metrics["val_loss"])
-        stt = int(metrics["steps_to_target"])
-        if stt < 0:
-            stt = int(args.steps + args.eval_every)
+        steps_to_100 = trial.user_attrs.get("steps_to_100_val_acc", None)
+        if steps_to_100 is None:
+            steps_to_100 = int(args.steps + args.eval_every)
 
-        return final_val_loss, stt
+        return int(steps_to_100)
+
 
     timeout = None if args.optuna_timeout_s <= 0 else float(args.optuna_timeout_s)
     study.optimize(objective, n_trials=args.optuna_n_trials, timeout=timeout, gc_after_trial=True)
 
-    pareto = study.best_trials
-    print(f"pareto_front_size={len(pareto)}")
-    # noinspection PyShadowingNames
-    pareto_sorted = sorted(pareto, key=lambda t: (t.values[1], t.values[0]))
-    for t in pareto_sorted[: min(len(pareto_sorted), args.optuna_print_pareto)]:
-        v0, v1 = t.values
-        print(f"trial={t.number}  final_val_loss={v0:.6f}  steps_to_target={int(v1)}  params={t.params}")
+    best = study.best_trial
+    print(f"best_trial={best.number}  steps_to_100={int(best.value)}  params={best.params}")
 
 
 def main():
@@ -531,7 +574,7 @@ def main():
     ap.add_argument("--optuna_eval_every", type=int, default=50)
     ap.add_argument("--optuna_storage", type=str, default="")
     ap.add_argument("--optuna_study_name", type=str, default="late_generalization_mo")
-    ap.add_argument("--optuna_sampler", type=str, default="nsga2", choices=["nsga2", "tpe", "random"])
+    ap.add_argument("--optuna_sampler", type=str, default="tpe", choices=["nsga2", "tpe", "random"])
     ap.add_argument("--optuna_seed", type=int, default=1337)
 
     ap.add_argument("--optuna_target_val_loss", type=float, default=1e-3)
