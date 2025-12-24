@@ -175,7 +175,7 @@ def _maybe_reset_compile_cache() -> None:
 _PRUNE_HISTORY = defaultdict(list)
 
 
-def _median_prune(step: int, val_loss: float, args: argparse.Namespace) -> bool:
+def _median_prune(step: int, val_acc: float, args: argparse.Namespace) -> bool:
     if args.optuna_prune_median_off:
         return False
     if step < args.optuna_prune_warmup_steps:
@@ -184,7 +184,7 @@ def _median_prune(step: int, val_loss: float, args: argparse.Namespace) -> bool:
     if len(past) < args.optuna_prune_min_trials:
         return False
     med = statistics.median(past)
-    return val_loss > med * (1.0 + args.optuna_prune_margin)
+    return val_acc > med * (1.0 + args.optuna_prune_margin)
 
 
 def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[list[EvalCallback]] = None) -> dict[str, float]:
@@ -336,9 +336,11 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
+
+                if  val_acc < best_val_acc:
                     best_val_acc = val_acc
 
-                if steps_to_target is None and val_loss <= args.optuna_target_val_loss:
+                if steps_to_target is None and val_acc <= args.optuna_target_val_acc:
                     steps_to_target = step
 
                 dt = time.time() - t0
@@ -366,7 +368,7 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                             "chance_loss": chance_loss,
                             "best/val_loss": best_val_loss,
                             "best/val_acc": best_val_acc,
-                            "target/val_loss": args.optuna_target_val_loss,
+                            "target/val_acc": args.optuna_target_val_acc,
                             "steps_to_target": -1 if steps_to_target is None else int(steps_to_target),
                         }
                     )
@@ -383,14 +385,14 @@ def train_and_eval(args: argparse.Namespace, trial=None, *, on_eval: Optional[li
                         cb(event)
 
                 if trial is not None:
-                    do_prune = _median_prune(step, float(val_loss), args)
-                    _PRUNE_HISTORY[step].append(float(val_loss))
+                    do_prune = _median_prune(step, float(val_acc), args)
+                    _PRUNE_HISTORY[step].append(float(val_acc))
 
                     if do_prune:
                         if args.optuna_prune_action == "prune":
                             import optuna
                             trial.set_user_attr("pruned_at_step", int(step))
-                            trial.set_user_attr("pruned_val_loss", float(val_loss))
+                            trial.set_user_attr("pruned_val_acc", float(val_acc))
                             raise optuna.TrialPruned()
                         else:
                             steps_ran = step
@@ -578,7 +580,7 @@ def main():
     ap.add_argument("--optuna_sampler", type=str, default="tpe", choices=["nsga2", "tpe", "random"])
     ap.add_argument("--optuna_seed", type=int, default=1337)
 
-    ap.add_argument("--optuna_target_val_loss", type=float, default=1e-3)
+    ap.add_argument("--optuna_target_val_acc", type=float, default=1.0)
 
     ap.add_argument("--optuna_prune_median_off", action="store_true", default=False)
     ap.add_argument("--optuna_prune_action", type=str, default="prune", choices=["prune", "stop"])
