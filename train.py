@@ -126,6 +126,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
 
         bs = y.shape[0]
         total_loss += loss.detach() * bs
+        # noinspection PyUnresolvedReferences
         total_correct += (logits.argmax(dim=-1) == y).sum()
         total += bs
 
@@ -164,7 +165,7 @@ _PRUNE_HISTORY = defaultdict(list)
 
 
 def _median_prune(step: int, val_loss: float, args: argparse.Namespace) -> bool:
-    if not args.optuna_prune_median:
+    if args.optuna_prune_median_off:
         return False
     if step < args.optuna_prune_warmup_steps:
         return False
@@ -438,16 +439,17 @@ def run_optuna(args: argparse.Namespace) -> None:
         sampler=sampler,
     )
 
-    def objective(trial: "optuna.Trial"):
+    def objective(trial: optuna.Trial):
         nhead = trial.suggest_categorical("nhead", [8])
         head_dim = trial.suggest_categorical("head_dim", [16, 32, 64])
         d_model = int(nhead * head_dim)
         d_ff_mult = trial.suggest_categorical("d_ff_mult", [2, 4, 8])
         d_ff = int(d_model * d_ff_mult)
 
-        num_layers = trial.suggest_int("num_layers", 1, 4)
+        # num_layers = trial.suggest_int("num_layers", 1, 4)
+        num_layers = 2
         dropout = trial.suggest_float("dropout", 0.0, 0.3)
-        lr = trial.suggest_float("lr", 3e-4, 3e-3, log=True)
+        lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         weight_decay = trial.suggest_float("weight_decay", 0.5, 2.0)
         # lr_warmup_steps = trial.suggest_int("lr_warmup_steps", 0, 200)
         lr_warmup_steps = 100
@@ -532,8 +534,8 @@ def main():
 
     ap.add_argument("--optuna_target_val_loss", type=float, default=1e-3)
 
-    ap.add_argument("--optuna_prune_median", action="store_true")
-    ap.add_argument("--optuna_prune_action", type=str, default="stop", choices=["prune", "stop"])
+    ap.add_argument("--optuna_prune_median_off", action="store_true", default=False)
+    ap.add_argument("--optuna_prune_action", type=str, default="prune", choices=["prune", "stop"])
     ap.add_argument("--optuna_prune_warmup_steps", type=int, default=0)
     ap.add_argument("--optuna_prune_min_trials", type=int, default=10)
     ap.add_argument("--optuna_prune_margin", type=float, default=0.0)
