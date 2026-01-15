@@ -107,6 +107,9 @@ If you do **not** see delayed generalization, try these levers:
    - if unstable: lower `--lr` and/or increase `--lr_warmup_steps`
    - if nothing happens: sometimes slightly higher `--lr` helps escape plateaus
 
+3. **Increase Dropout**
+   - if unstable val/acc try >=0.1
+
 Example run that may make the delayed transition easier to see:
 
 ```bash
