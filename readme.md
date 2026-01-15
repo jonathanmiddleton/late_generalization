@@ -97,40 +97,21 @@ If you log to W&B, the qualitative pattern to watch is:
 
 ## Reproducing grokking more reliably
 
-Grokking is sensitive to hyperparameters. If you do **not** see delayed generalization, try these levers:
+If you do **not** see delayed generalization, try these levers:
 
-1. **Increase training duration**
-   - grokking often requires a very large number of optimization steps / effective epochs
-   - start by increasing `--steps` (e.g. `300000` or more)
-
-2. **Adjust weight decay (often critical)**
-   - try `--weight_decay 0.5`, `1.0`, `2.0`
-
-3. **Reduce training set fraction**
+1. **Reduce training set fraction**
    - smaller `--train_frac` generally makes generalization harder and can make the delay more pronounced  
    - try `--train_frac 0.3` or `0.2`
 
-4. **Tune learning rate and warmup**
+2. **Tune learning rate and warmup**
    - if unstable: lower `--lr` and/or increase `--lr_warmup_steps`
    - if nothing happens: sometimes slightly higher `--lr` helps escape plateaus
 
-Example run that often makes the delayed transition easier to see:
+Example run that may make the delayed transition easier to see:
 
 ```bash
-python train_mod_add.py   --p 97   --train_frac 0.3   --steps 300000   --eval_every 250   --batch_size 512   --lr 5e-4   --lr_warmup_steps 100   --weight_decay 1.0   --dropout 0.0
+python train_mod_add.py   --p 97   --train_frac 0.1   --steps 300000   --eval_every 250   --batch_size 512   --lr 5e-4   --lr_warmup_steps 100   --weight_decay 1.0   --dropout 0.0
 ```
-
-### Interpreting “steps” vs “epochs”
-
-This script trains by iterating batches indefinitely (it restarts the DataLoader iterator when an epoch ends), so the meaningful quantity is often **effective epochs**:
-
-```
-effective_epochs ≈ steps * batch_size / |train_set|
-```
-
-For example, with `p=97`, `train_frac=0.5`, `|train| ≈ 4704`, `batch_size=512`:
-
-- `100000` steps corresponds to roughly `100000 * 512 / 4704 ≈ 10884` effective epochs
 
 ---
 
