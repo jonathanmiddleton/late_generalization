@@ -1,4 +1,4 @@
-# Grokking on Modular Addition (PyTorch)
+# Grokking on Modular Addition 
 
 This is a minimal, single-file reproduction of the **grokking / delayed generalization** phenomenon described in:
 
@@ -33,26 +33,19 @@ The model is trained to predict the label (a class in `0 … p-1`) from the sequ
 **Train/validation split**  
 A random split is taken over the full set of `p²` pairs:
 - `train_frac` controls what fraction goes into training
-- the remainder is used for validation (a held-out set of pairs)
+- the remainder is used for validation
 
 **Model**  
 A small causal Transformer (token embeddings + positional embeddings + `nn.TransformerEncoder` with a causal mask) reads the 4-token sequence and predicts the result using the hidden state at the final position.
 
 **Optimization**  
-Training uses AdamW with explicit weight decay. In many grokking reproductions (including the paper), **weight decay is an important knob** for inducing delayed generalization.
-
----
-
-## Files
-
-This README describes the provided single Python script (save it as, e.g., `train_mod_add.py`).
+Training uses AdamW with explicit weight decay. 
 
 ---
 
 ## Requirements
 
-- Python **3.9+** (uses modern type annotations like `tuple[...]`)
-- PyTorch (2.x recommended)
+- PyTorch
 - `wandb` 
 - `optuna` (optional, only if you use `--optuna`)
 
@@ -220,18 +213,6 @@ Notes:
 - accuracy
 over an entire DataLoader (train set or validation set).
 
----
-
-- **Validation accuracy never improves above chance**  
-  Try:
-  - more steps: `--steps 300000` (or more)
-  - stronger regularization: `--weight_decay 1.0` to `2.0`
-  - smaller train split: `--train_frac 0.2` to `0.4`
-  - smaller LR: `--lr 5e-4` or `3e-4`
-
-- **Validation accuracy improves immediately (no delay)**  
-  This is not “wrong”; it just means you are not in the delayed-generalization regime. To induce a stronger delay, try decreasing `--train_frac`
-  
 ---
 
 ## Reference (BibTeX)
